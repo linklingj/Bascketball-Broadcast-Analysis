@@ -77,3 +77,4 @@ test_images/
 .serverless/
 
 # If dataset should be local-only, uncomment below
+dataset/
