@@ -78,3 +78,6 @@ test_images/
 
 # If dataset should be local-only, uncomment below
 dataset/
+
+*.mp4
+*.csv
