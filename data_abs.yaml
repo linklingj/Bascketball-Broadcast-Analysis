@@ -1,0 +1,15 @@
+names:
+- ball
+- ball-in-basket
+- number
+- player
+- player-in-possession
+- player-jump-shot
+- player-layup-dunk
+- player-shot-block
+- referee
+- rim
+nc: 10
+test: /Users/jaehyun/Documents/Projects/DL/BasketballBroadcastAnalysis/dataset/test/images
+train: /Users/jaehyun/Documents/Projects/DL/BasketballBroadcastAnalysis/dataset/train/images
+val: /Users/jaehyun/Documents/Projects/DL/BasketballBroadcastAnalysis/dataset/valid/images
