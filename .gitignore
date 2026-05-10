@@ -81,3 +81,7 @@ dataset/
 
 *.mp4
 *.csv
+
+# LLM
+.claude
+claude.md
