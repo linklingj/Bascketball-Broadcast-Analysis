@@ -16,6 +16,7 @@ DEFAULT_OUTPUT_PATH = "score_timeline.csv"
 DEFAULT_INTERVAL_SEC = 1.0
 DEFAULT_CONFIRM_COUNT = 2
 INITIAL_SCORE_WINDOW_SEC = 5.0
+GAME_CLOCK_TOLERANCE_SEC = 2
 
 MIN_OCR_CONFIDENCE = 0.25
 MIN_INFO_OCR_CONFIDENCE = 0.10
@@ -1101,16 +1102,14 @@ def apply_stable_context(parsed: ParsedScoreboard, stable: dict[str, object], ti
     last_quarter = stable.get("game_clock_quarter")
 
     if clock_seconds is not None:
-        if (
-            isinstance(last_clock_seconds, int)
-            and isinstance(last_clock_time, (int, float))
-            and last_quarter == quarter
-            and time_sec > float(last_clock_time)
-            and clock_seconds >= last_clock_seconds
-        ):
+        if isinstance(last_clock_seconds, int) and isinstance(last_clock_time, (int, float)) and last_quarter == quarter:
             elapsed = int(round(time_sec - float(last_clock_time)))
-            clock_seconds = max(0, last_clock_seconds - elapsed)
-            game_clock = seconds_to_game_clock(clock_seconds)
+            expected_clock_seconds = max(0, last_clock_seconds - max(0, elapsed))
+            if time_sec > float(last_clock_time) and abs(clock_seconds - expected_clock_seconds) > GAME_CLOCK_TOLERANCE_SEC:
+                clock_seconds = expected_clock_seconds
+                game_clock = seconds_to_game_clock(clock_seconds)
+            else:
+                game_clock = seconds_to_game_clock(clock_seconds)
         else:
             game_clock = seconds_to_game_clock(clock_seconds)
 
