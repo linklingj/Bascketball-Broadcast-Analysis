@@ -81,6 +81,9 @@ dataset/
 
 *.mp4
 *.csv
+debug_*.jpg
+score_region.jpg
+team*_score_region.jpg
 
 # LLM
 .claude

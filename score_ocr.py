@@ -1,14 +1,4 @@
-﻿"""
-Basketball scoreboard OCR
-=========================
-
-Stable version for 1_final.mp4.
-
-This script keeps the original score extraction style and only adds stable
-context fields: team names, quarter, game clock, and analysis time.
-"""
-
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import re
@@ -21,7 +11,7 @@ import easyocr
 import pandas as pd
 
 
-DEFAULT_VIDEO_PATH = "2_final.mp4"
+DEFAULT_VIDEO_PATH = "1_.mp4"
 DEFAULT_OUTPUT_PATH = "score_timeline.csv"
 DEFAULT_INTERVAL_SEC = 1.0
 DEFAULT_CONFIRM_COUNT = 2
@@ -129,6 +119,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default=DEFAULT_OUTPUT_PATH, help="Output CSV path")
     parser.add_argument("--team1", default=UNKNOWN, help="Manual left team name, e.g. DEN")
     parser.add_argument("--team2", default=UNKNOWN, help="Manual right team name, e.g. UTA")
+    parser.add_argument(
+        "--left-score-box",
+        default="",
+        help="Manual left score crop as x1,y1,x2,y2 ratios, e.g. 0.715,0.79,0.775,0.865",
+    )
+    parser.add_argument(
+        "--right-score-box",
+        default="",
+        help="Manual right score crop as x1,y1,x2,y2 ratios, e.g. 0.835,0.79,0.895,0.865",
+    )
     parser.add_argument("--interval", type=float, default=DEFAULT_INTERVAL_SEC, help="Sampling interval in seconds")
     parser.add_argument(
         "--confirm-count",
@@ -151,6 +151,21 @@ def parse_args() -> argparse.Namespace:
         help="Debug limit. 0 means full video; positive value limits OCR samples.",
     )
     return parser.parse_args()
+
+
+def parse_box_arg(value: str) -> tuple[float, float, float, float] | None:
+    if not value:
+        return None
+
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) != 4:
+        raise ValueError(f"Box must have 4 comma-separated values: {value}")
+
+    x1, y1, x2, y2 = (float(part) for part in parts)
+    if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
+        raise ValueError(f"Box ratios must satisfy 0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1: {value}")
+
+    return x1, y1, x2, y2
 
 
 def bbox_bounds(bbox) -> tuple[float, float, float, float]:
@@ -243,7 +258,6 @@ def normalize_team_name(text: str) -> str:
         if alias in cleaned:
             return team
 
-    # Only accept known team text. Short OCR noise is too risky here.
     for team in KNOWN_TEAM_CODES:
         if team in cleaned:
             return team
@@ -296,8 +310,12 @@ def crop_by_ratio(frame, y1: float, y2: float, x1: float, x2: float):
     return frame[top:bottom, left:right]
 
 
+def crop_by_box(frame, box: tuple[float, float, float, float]):
+    x1, y1, x2, y2 = box
+    return crop_by_ratio(frame, y1, y2, x1, x2)
+
+
 def get_score_box_pairs(frame) -> dict[str, tuple[object, object]]:
-    # Try the layouts we have seen so far. Each entry is (left score, right score).
     return {
         "espn_bottom_left": (
             crop_by_ratio(frame, 0.84, 0.94, 0.180, 0.245),
@@ -437,43 +455,69 @@ def read_scoreboard_info_items(reader: easyocr.Reader, frame) -> list[OcrItem]:
     return items
 
 
-def read_single_score_value(reader: easyocr.Reader, region_img) -> tuple[int, str, float] | None:
-    # Score boxes are easiest to read in color. Extra preprocessing hurt here.
-    results = reader.readtext(
-        region_img,
-        detail=1,
-        paragraph=False,
-        allowlist="0123456789",
-    )
+def score_box_ocr_inputs(region_img, side: str) -> list[tuple[object, float, str]]:
+    inputs: list[tuple[object, float, str]] = [(region_img, 1.0, "original")]
+
+    if side == "right":
+        enlarged = cv2.resize(region_img, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+        enlarged = cv2.copyMakeBorder(
+            enlarged,
+            8,
+            8,
+            8,
+            8,
+            cv2.BORDER_CONSTANT,
+            value=(0, 0, 0),
+        )
+        inputs.append((enlarged, 3.0, "right_enlarged"))
+
+    return inputs
+
+
+def read_single_score_value(reader: easyocr.Reader, region_img, side: str = "left") -> tuple[int, str, float] | None:
     candidates: list[NumberCandidate] = []
 
-    for bbox, text, conf in results:
-        numeric = normalize_numeric_text(str(text))
-        if not re.fullmatch(r"\d{1,3}", numeric):
-            continue
-
-        value = int(numeric)
-        if value > MAX_SCORE_VALUE:
-            continue
-
-        x1, y1, x2, y2 = bbox_bounds(bbox)
-        candidates.append(
-            NumberCandidate(
-                value=value,
-                raw=str(text),
-                conf=float(conf),
-                x=(x1 + x2) / 2,
-                y=(y1 + y2) / 2,
-                width=x2 - x1,
-                height=y2 - y1,
-                roi="score_box",
-            )
+    for image, scale, source in score_box_ocr_inputs(region_img, side):
+        results = reader.readtext(
+            image,
+            detail=1,
+            paragraph=False,
+            allowlist="0123456789",
         )
+
+        for bbox, text, conf in results:
+            numeric = normalize_numeric_text(str(text))
+            if not re.fullmatch(r"\d{1,3}", numeric):
+                continue
+
+            value = int(numeric)
+            if value > MAX_SCORE_VALUE:
+                continue
+
+            x1, y1, x2, y2 = bbox_bounds(bbox)
+            candidates.append(
+                NumberCandidate(
+                    value=value,
+                    raw=str(text),
+                    conf=float(conf),
+                    x=((x1 + x2) / 2) / scale,
+                    y=((y1 + y2) / 2) / scale,
+                    width=(x2 - x1) / scale,
+                    height=(y2 - y1) / scale,
+                    roi=source,
+                )
+            )
 
     if not candidates:
         return None
 
-    candidates.sort(key=lambda item: (item.height * item.conf, item.conf), reverse=True)
+    candidates.sort(
+        key=lambda item: (
+            item.conf + (0.08 if item.roi == "right_enlarged" else 0.0),
+            item.height * item.conf,
+        ),
+        reverse=True,
+    )
     best = candidates[0]
     return best.value, best.raw, best.conf
 
@@ -708,7 +752,6 @@ def choose_score_pair(candidates: list[NumberCandidate]) -> tuple[tuple[NumberCa
     if len(candidates) < 2:
         return None, 0.0
 
-    # Prefer the biggest two digits in the score area.
     tallest = max(candidate.height for candidate in candidates)
     large_candidates = [
         candidate
@@ -874,7 +917,12 @@ def parse_region(items: list[OcrItem]) -> tuple[ParsedScoreboard | None, list[Nu
     )
 
 
-def choose_best_region(reader: easyocr.Reader, frame, debug: bool = False) -> tuple[str, ParsedScoreboard] | None:
+def choose_best_region(
+    reader: easyocr.Reader,
+    frame,
+    debug: bool = False,
+    manual_score_boxes: tuple[tuple[float, float, float, float], tuple[float, float, float, float]] | None = None,
+) -> tuple[str, ParsedScoreboard] | None:
     quarter, game_clock, info_teams = extract_scoreboard_info(reader, frame, debug=debug)
     box_team1, box_team2 = extract_team_names_from_boxes(reader, frame, debug=debug)
     info_team1, info_team2 = info_teams
@@ -883,9 +931,15 @@ def choose_best_region(reader: easyocr.Reader, frame, debug: bool = False) -> tu
     best_box_result: tuple[str, ParsedScoreboard] | None = None
     best_box_quality = float("-inf")
 
-    for region_name, (left_img, right_img) in get_score_box_pairs(frame).items():
-        left_value = read_single_score_value(reader, left_img)
-        right_value = read_single_score_value(reader, right_img)
+    score_box_pairs = {}
+    if manual_score_boxes is not None:
+        left_box, right_box = manual_score_boxes
+        score_box_pairs["manual_score_boxes"] = (crop_by_box(frame, left_box), crop_by_box(frame, right_box))
+    score_box_pairs.update(get_score_box_pairs(frame))
+
+    for region_name, (left_img, right_img) in score_box_pairs.items():
+        left_value = read_single_score_value(reader, left_img, side="left")
+        right_value = read_single_score_value(reader, right_img, side="right")
 
         if debug:
             print(f"        {region_name}: left={left_value}, right={right_value}")
@@ -902,6 +956,8 @@ def choose_best_region(reader: easyocr.Reader, frame, debug: bool = False) -> tu
             continue
 
         quality = score_box_pair_quality(left_value, right_value, region_name)
+        if region_name == "manual_score_boxes":
+            quality += 50.0
         parsed = ParsedScoreboard(
             team1_score=left_score,
             team2_score=right_score,
@@ -938,7 +994,6 @@ def choose_best_region(reader: easyocr.Reader, frame, debug: bool = False) -> tu
         parsed.team1_name = team1_name
         parsed.team2_name = team2_name
 
-        # Fallback for layouts not covered by the score-box candidates.
         return region_name, parsed
 
     return None
@@ -967,6 +1022,48 @@ def is_valid_score_transition(new_score: tuple[int, int], last_score: tuple[int,
     )
 
 
+def one_digit_off(value: int, target: int) -> bool:
+    value_text = str(value)
+    target_text = str(target)
+    if len(value_text) != len(target_text):
+        return False
+    return sum(a != b for a, b in zip(value_text, target_text)) == 1
+
+
+def infer_plausible_score_from_ocr_error(
+    new_score: tuple[int, int],
+    last_score: tuple[int, int] | None,
+) -> tuple[int, int] | None:
+    if last_score is None or is_valid_score_transition(new_score, last_score):
+        return None
+
+    new_a, new_b = new_score
+    last_a, last_b = last_score
+    if new_b == last_b and new_a > last_a + 3:
+        for target_a in (last_a + 1, last_a + 2, last_a + 3):
+            if one_digit_off(new_a, target_a):
+                return target_a, last_b
+
+    if new_a == last_a and new_b > last_b + 3:
+        for target_b in (last_b + 1, last_b + 2, last_b + 3):
+            if one_digit_off(new_b, target_b):
+                return last_a, target_b
+
+    return None
+
+
+def with_score(parsed: ParsedScoreboard, score: tuple[int, int]) -> ParsedScoreboard:
+    return ParsedScoreboard(
+        team1_score=score[0],
+        team2_score=score[1],
+        team1_name=parsed.team1_name,
+        team2_name=parsed.team2_name,
+        quarter=parsed.quarter,
+        game_clock=parsed.game_clock,
+        region_score=parsed.region_score,
+    )
+
+
 def format_analysis_time(time_sec: float) -> str:
     total_seconds = max(0, int(round(time_sec)))
     hours = total_seconds // 3600
@@ -983,7 +1080,6 @@ def apply_stable_context(parsed: ParsedScoreboard, stable: dict[str, object], ti
     if last_team2 == UNKNOWN:
         last_team2 = ""
 
-    # Keep the first good team names for the clip.
     if parsed.team1_name and not last_team1:
         stable["team1_name"] = parsed.team1_name
         last_team1 = parsed.team1_name
@@ -1082,7 +1178,6 @@ def print_score_change_summary(df: pd.DataFrame) -> None:
             final_row = row
             continue
 
-        # Only show normal basketball scoring changes.
         if score == previous_score:
             final_row = row
             continue
@@ -1116,6 +1211,7 @@ def analyze_video(
     output_path: str = DEFAULT_OUTPUT_PATH,
     team1_name: str = UNKNOWN,
     team2_name: str = UNKNOWN,
+    manual_score_boxes: tuple[tuple[float, float, float, float], tuple[float, float, float, float]] | None = None,
     interval_sec: float = DEFAULT_INTERVAL_SEC,
     confirm_count: int = DEFAULT_CONFIRM_COUNT,
     record_mode: str = "score-change",
@@ -1131,7 +1227,6 @@ def analyze_video(
     if not fps or fps <= 0:
         fps = 30.0
 
-    # Read sequentially so timestamps stay aligned with playback.
     frame_step = max(1, int(round(fps * interval_sec)))
 
     print(f"Video: {video_path}")
@@ -1145,6 +1240,10 @@ def analyze_video(
     last_confirmed_score: tuple[int, int] | None = None
     initial_score_counts: Counter[tuple[int, int]] = Counter()
     initial_score_samples: dict[tuple[int, int], tuple[float, ParsedScoreboard, str]] = {}
+    pending_corrected_score: tuple[int, int] | None = None
+    pending_corrected_time: float = 0.0
+    pending_corrected_parsed: ParsedScoreboard | None = None
+    pending_corrected_votes = 0
     processed_samples = 0
     frame_id = 0
 
@@ -1153,7 +1252,6 @@ def analyze_video(
         if not ret:
             break
 
-        # Run OCR at the sampling interval only.
         if frame_id % frame_step != 0:
             frame_id += 1
             continue
@@ -1164,7 +1262,12 @@ def analyze_video(
         if max_samples and processed_samples > max_samples:
             break
 
-        result = choose_best_region(reader, frame, debug=debug)
+        result = choose_best_region(
+            reader,
+            frame,
+            debug=debug,
+            manual_score_boxes=manual_score_boxes,
+        )
         if result is None:
             print(f"[{format_analysis_time(time_sec)}] scoreboard not found")
             frame_id += 1
@@ -1176,7 +1279,6 @@ def analyze_video(
 
         print_scoreboard(time_sec, parsed)
 
-        # Use a short vote to set the starting score.
         if last_confirmed_score is None:
             if time_sec < INITIAL_SCORE_WINDOW_SEC:
                 initial_score_counts[score] += 1
@@ -1208,8 +1310,39 @@ def analyze_video(
                 frame_id += 1
                 continue
 
-        # After that, only accept normal scoring changes.
         if not is_valid_score_transition(score, last_confirmed_score):
+            corrected_score = infer_plausible_score_from_ocr_error(score, last_confirmed_score)
+            if corrected_score is not None:
+                corrected_parsed = with_score(parsed, corrected_score)
+                if pending_corrected_score == corrected_score:
+                    pending_corrected_votes += 1
+                else:
+                    pending_corrected_score = corrected_score
+                    pending_corrected_time = time_sec
+                    pending_corrected_parsed = corrected_parsed
+                    pending_corrected_votes = 1
+
+                print(
+                    "           -> possible OCR score correction: "
+                    f"{score[0]}:{score[1]} -> {corrected_score[0]}:{corrected_score[1]} "
+                    f"({pending_corrected_votes} votes)"
+                )
+
+                if pending_corrected_votes >= max(1, confirm_count):
+                    last_confirmed_score = corrected_score
+                    append_record(records, pending_corrected_time, pending_corrected_parsed or corrected_parsed)
+                    print(
+                        "           -> corrected score change recorded: "
+                        f"{corrected_score[0]}:{corrected_score[1]} "
+                        f"at {format_analysis_time(pending_corrected_time)}"
+                    )
+                    pending_corrected_score = None
+                    pending_corrected_parsed = None
+                    pending_corrected_votes = 0
+
+                frame_id += 1
+                continue
+
             print(
                 "           -> ignored invalid score transition: "
                 f"{last_confirmed_score[0]}:{last_confirmed_score[1]} -> {score[0]}:{score[1]}"
@@ -1218,9 +1351,25 @@ def analyze_video(
             continue
 
         if score != last_confirmed_score:
+            if pending_corrected_score == score and pending_corrected_parsed is not None:
+                last_confirmed_score = score
+                append_record(records, pending_corrected_time, pending_corrected_parsed)
+                print(
+                    "           -> score change recorded from earlier OCR correction: "
+                    f"{score[0]}:{score[1]} at {format_analysis_time(pending_corrected_time)}"
+                )
+                pending_corrected_score = None
+                pending_corrected_parsed = None
+                pending_corrected_votes = 0
+                frame_id += 1
+                continue
+
             last_confirmed_score = score
             append_record(records, time_sec, parsed)
             print(f"           -> score change recorded: {score[0]}:{score[1]}")
+            pending_corrected_score = None
+            pending_corrected_parsed = None
+            pending_corrected_votes = 0
         elif record_mode == "every-sample":
             append_record(records, time_sec, parsed)
 
@@ -1246,6 +1395,13 @@ def analyze_video(
 
 def main() -> None:
     args = parse_args()
+    left_score_box = parse_box_arg(args.left_score_box)
+    right_score_box = parse_box_arg(args.right_score_box)
+    manual_score_boxes = None
+    if left_score_box or right_score_box:
+        if left_score_box is None or right_score_box is None:
+            raise ValueError("--left-score-box and --right-score-box must be used together")
+        manual_score_boxes = (left_score_box, right_score_box)
 
     print("Preparing EasyOCR model...")
     reader = easyocr.Reader(["en"], gpu=args.gpu)
@@ -1256,6 +1412,7 @@ def main() -> None:
         output_path=str(Path(args.output)),
         team1_name=args.team1,
         team2_name=args.team2,
+        manual_score_boxes=manual_score_boxes,
         interval_sec=args.interval,
         confirm_count=max(1, args.confirm_count),
         record_mode=args.record_mode,
