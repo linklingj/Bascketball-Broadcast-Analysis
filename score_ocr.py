@@ -15,6 +15,8 @@ DEFAULT_VIDEO_PATH = "1_.mp4"
 DEFAULT_OUTPUT_PATH = "score_timeline.csv"
 DEFAULT_INTERVAL_SEC = 1.0
 DEFAULT_CONFIRM_COUNT = 2
+DEFAULT_RESYNC_COUNT = 3
+MAX_RESYNC_SCORE_JUMP = 12
 INITIAL_SCORE_WINDOW_SEC = 5.0
 
 MIN_OCR_CONFIDENCE = 0.25
@@ -137,6 +139,12 @@ def parse_args() -> argparse.Namespace:
         help="Number of repeated scores required for initial confirmation",
     )
     parser.add_argument(
+        "--resync-count",
+        type=int,
+        default=DEFAULT_RESYNC_COUNT,
+        help="Repeated non-decreasing invalid scores required to resync after missed samples",
+    )
+    parser.add_argument(
         "--record-mode",
         choices=["every-sample", "score-change"],
         default="score-change",
@@ -241,6 +249,21 @@ def game_clock_to_seconds(clock: str) -> int | None:
 def seconds_to_game_clock(seconds: int) -> str:
     seconds = max(0, int(seconds))
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
+def validate_game_clock_transition(prev_clock: str, new_clock: str) -> tuple[bool, str]:
+    prev_seconds = game_clock_to_seconds(prev_clock)
+    new_seconds = game_clock_to_seconds(new_clock)
+    if prev_seconds is None or new_seconds is None:
+        return False, prev_clock
+
+    if prev_seconds == 0 and new_seconds > 0:
+        return True, new_clock
+
+    diff = prev_seconds - new_seconds
+    if 0 <= diff <= 3:
+        return True, new_clock
+    return False, prev_clock
 
 
 def normalize_team_name(text: str) -> str:
@@ -1000,11 +1023,11 @@ def choose_best_region(
 
 
 def is_valid_score_transition(new_score: tuple[int, int], last_score: tuple[int, int] | None) -> bool:
-    a, b = new_score
+    new_a, new_b = new_score
 
     if is_obvious_bad_pair(
-        NumberCandidate(a, str(a), 1.0, 0, 0, 1, 1),
-        NumberCandidate(b, str(b), 1.0, 1, 0, 1, 1),
+        NumberCandidate(new_a, str(new_a), 1.0, 0, 0, 1, 1),
+        NumberCandidate(new_b, str(new_b), 1.0, 1, 0, 1, 1),
     ):
         return False
 
@@ -1012,14 +1035,18 @@ def is_valid_score_transition(new_score: tuple[int, int], last_score: tuple[int,
         return True
 
     last_a, last_b = last_score
-    diff_a = a - last_a
-    diff_b = b - last_b
+    diff_a = new_a - last_a
+    diff_b = new_b - last_b
 
-    return (
-        (diff_a in (1, 2, 3) and diff_b == 0)
-        or (diff_b in (1, 2, 3) and diff_a == 0)
-        or (diff_a == 0 and diff_b == 0)
-    )
+    if diff_a < 0 or diff_b < 0:
+        return False
+    if diff_a == 0 and diff_b == 0:
+        return True
+    if diff_a in (1, 2, 3) and diff_b == 0:
+        return True
+    if diff_b in (1, 2, 3) and diff_a == 0:
+        return True
+    return False
 
 
 def one_digit_off(value: int, target: int) -> bool:
@@ -1028,6 +1055,10 @@ def one_digit_off(value: int, target: int) -> bool:
     if len(value_text) != len(target_text):
         return False
     return sum(a != b for a, b in zip(value_text, target_text)) == 1
+
+
+def plausible_single_digit_score_error(value: int, target: int) -> bool:
+    return one_digit_off(value, target) and abs(value - target) <= 10
 
 
 def infer_plausible_score_from_ocr_error(
@@ -1041,15 +1072,37 @@ def infer_plausible_score_from_ocr_error(
     last_a, last_b = last_score
     if new_b == last_b and new_a > last_a + 3:
         for target_a in (last_a + 1, last_a + 2, last_a + 3):
-            if one_digit_off(new_a, target_a):
+            if plausible_single_digit_score_error(new_a, target_a):
                 return target_a, last_b
 
     if new_a == last_a and new_b > last_b + 3:
         for target_b in (last_b + 1, last_b + 2, last_b + 3):
-            if one_digit_off(new_b, target_b):
+            if plausible_single_digit_score_error(new_b, target_b):
                 return last_a, target_b
 
     return None
+
+
+def is_plausible_resync_score(new_score: tuple[int, int], last_score: tuple[int, int] | None) -> bool:
+    if last_score is None or is_valid_score_transition(new_score, last_score):
+        return False
+
+    new_a, new_b = new_score
+    last_a, last_b = last_score
+    diff_a = new_a - last_a
+    diff_b = new_b - last_b
+
+    if diff_a < 0 or diff_b < 0:
+        return False
+    if diff_a > MAX_RESYNC_SCORE_JUMP or diff_b > MAX_RESYNC_SCORE_JUMP:
+        return False
+    if is_obvious_bad_pair(
+        NumberCandidate(new_a, str(new_a), 1.0, 0, 0, 1, 1),
+        NumberCandidate(new_b, str(new_b), 1.0, 1, 0, 1, 1),
+    ):
+        return False
+
+    return diff_a > 0 or diff_b > 0
 
 
 def with_score(parsed: ParsedScoreboard, score: tuple[int, int]) -> ParsedScoreboard:
@@ -1099,25 +1152,38 @@ def apply_stable_context(parsed: ParsedScoreboard, stable: dict[str, object], ti
     last_clock_seconds = stable.get("game_clock_seconds")
     last_clock_time = stable.get("game_clock_time")
     last_quarter = stable.get("game_clock_quarter")
+    last_clock = str(stable.get("game_clock") or "")
 
     if clock_seconds is not None:
-        if (
-            isinstance(last_clock_seconds, int)
-            and isinstance(last_clock_time, (int, float))
-            and last_quarter == quarter
-            and time_sec > float(last_clock_time)
-            and clock_seconds >= last_clock_seconds
-        ):
-            elapsed = int(round(time_sec - float(last_clock_time)))
-            clock_seconds = max(0, last_clock_seconds - elapsed)
-            game_clock = seconds_to_game_clock(clock_seconds)
+        if last_clock and isinstance(last_clock_seconds, int) and last_quarter == quarter:
+            elapsed = 1
+            if isinstance(last_clock_time, (int, float)):
+                elapsed = max(0, int(round(time_sec - float(last_clock_time))))
+
+            expected_clock_seconds = max(0, last_clock_seconds - elapsed)
+            drop = last_clock_seconds - clock_seconds
+
+            if last_clock_seconds == 0 and clock_seconds > 0:
+                game_clock = seconds_to_game_clock(clock_seconds)
+            elif elapsed > 0 and clock_seconds >= last_clock_seconds:
+                game_clock = seconds_to_game_clock(expected_clock_seconds)
+                clock_seconds = expected_clock_seconds
+            elif drop > max(3, elapsed + 2):
+                game_clock = seconds_to_game_clock(expected_clock_seconds)
+                clock_seconds = expected_clock_seconds
+            else:
+                game_clock = seconds_to_game_clock(clock_seconds)
+
+            stable["game_clock"] = game_clock
+            stable["game_clock_seconds"] = clock_seconds
+            stable["game_clock_time"] = time_sec
+            stable["game_clock_quarter"] = quarter
         else:
             game_clock = seconds_to_game_clock(clock_seconds)
-
-        stable["game_clock"] = game_clock
-        stable["game_clock_seconds"] = clock_seconds
-        stable["game_clock_time"] = time_sec
-        stable["game_clock_quarter"] = quarter
+            stable["game_clock"] = game_clock
+            stable["game_clock_seconds"] = clock_seconds
+            stable["game_clock_time"] = time_sec
+            stable["game_clock_quarter"] = quarter
     elif isinstance(last_clock_seconds, int) and isinstance(last_clock_time, (int, float)) and last_quarter == quarter:
         elapsed = int(round(time_sec - float(last_clock_time)))
         clock_seconds = max(0, last_clock_seconds - elapsed)
@@ -1214,6 +1280,7 @@ def analyze_video(
     manual_score_boxes: tuple[tuple[float, float, float, float], tuple[float, float, float, float]] | None = None,
     interval_sec: float = DEFAULT_INTERVAL_SEC,
     confirm_count: int = DEFAULT_CONFIRM_COUNT,
+    resync_count: int = DEFAULT_RESYNC_COUNT,
     record_mode: str = "score-change",
     debug: bool = False,
     max_samples: int = 0,
@@ -1244,6 +1311,10 @@ def analyze_video(
     pending_corrected_time: float = 0.0
     pending_corrected_parsed: ParsedScoreboard | None = None
     pending_corrected_votes = 0
+    pending_resync_score: tuple[int, int] | None = None
+    pending_resync_time: float = 0.0
+    pending_resync_parsed: ParsedScoreboard | None = None
+    pending_resync_votes = 0
     processed_samples = 0
     frame_id = 0
 
@@ -1284,8 +1355,8 @@ def analyze_video(
                 initial_score_counts[score] += 1
                 initial_score_samples[score] = (time_sec, parsed, region_name)
                 print(
-                    "           -> initial candidate: "
-                    f"{score[0]}:{score[1]} ({initial_score_counts[score]} votes)"
+                    "           -> initial candidate collected: "
+                    f"{score[0]}:{score[1]} ({initial_score_counts[score]} votes, not confirmed)"
                 )
                 frame_id += 1
                 continue
@@ -1339,9 +1410,45 @@ def analyze_video(
                     pending_corrected_score = None
                     pending_corrected_parsed = None
                     pending_corrected_votes = 0
+                    pending_resync_score = None
+                    pending_resync_parsed = None
+                    pending_resync_votes = 0
 
                 frame_id += 1
                 continue
+
+            if is_plausible_resync_score(score, last_confirmed_score):
+                if pending_resync_score == score:
+                    pending_resync_votes += 1
+                else:
+                    pending_resync_score = score
+                    pending_resync_time = time_sec
+                    pending_resync_parsed = parsed
+                    pending_resync_votes = 1
+
+                print(
+                    "           -> possible score resync: "
+                    f"{last_confirmed_score[0]}:{last_confirmed_score[1]} -> {score[0]}:{score[1]} "
+                    f"({pending_resync_votes} votes)"
+                )
+
+                if pending_resync_votes >= max(1, resync_count):
+                    last_confirmed_score = score
+                    append_record(records, pending_resync_time, pending_resync_parsed or parsed)
+                    print(
+                        "           -> score resynced after repeated read: "
+                        f"{score[0]}:{score[1]} at {format_analysis_time(pending_resync_time)}"
+                    )
+                    pending_resync_score = None
+                    pending_resync_parsed = None
+                    pending_resync_votes = 0
+
+                frame_id += 1
+                continue
+
+            pending_resync_score = None
+            pending_resync_parsed = None
+            pending_resync_votes = 0
 
             print(
                 "           -> ignored invalid score transition: "
@@ -1361,6 +1468,9 @@ def analyze_video(
                 pending_corrected_score = None
                 pending_corrected_parsed = None
                 pending_corrected_votes = 0
+                pending_resync_score = None
+                pending_resync_parsed = None
+                pending_resync_votes = 0
                 frame_id += 1
                 continue
 
@@ -1370,6 +1480,9 @@ def analyze_video(
             pending_corrected_score = None
             pending_corrected_parsed = None
             pending_corrected_votes = 0
+            pending_resync_score = None
+            pending_resync_parsed = None
+            pending_resync_votes = 0
         elif record_mode == "every-sample":
             append_record(records, time_sec, parsed)
 
@@ -1415,6 +1528,7 @@ def main() -> None:
         manual_score_boxes=manual_score_boxes,
         interval_sec=args.interval,
         confirm_count=max(1, args.confirm_count),
+        resync_count=max(1, args.resync_count),
         record_mode=args.record_mode,
         debug=args.debug,
         max_samples=args.max_samples,
