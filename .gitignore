@@ -80,7 +80,7 @@ test_images/
 dataset/
 
 *.mp4
-*.csv
+#*.csv
 
 # LLM
 .claude
