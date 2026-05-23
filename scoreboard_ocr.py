@@ -20,7 +20,7 @@ MAX_RESYNC_SCORE_JUMP = 12
 INITIAL_SCORE_WINDOW_SEC = 5.0
 MISSING_CONFIRM_COUNT = 3
 CUT_EDIT_MISSING_COUNT = 10
-MAX_CLOCK_RESYNC_DROP_SEC = 10
+MAX_CLOCK_RESYNC_DROP_SEC = 60
 CUT_EDIT_CLOCK_ADJUST_SEC = 5
 
 MIN_OCR_CONFIDENCE = 0.25
@@ -1420,9 +1420,10 @@ def handle_scoreboard_missing(stable: dict[str, object], time_sec: float) -> str
     if not isinstance(start_seconds, int):
         start_seconds = last_seconds
 
-    # Missing is now confirmed: freeze from the first missing moment.
+    # Missing is now confirmed: do not roll back to the first missing moment.
+    # Just freeze at the current last clock.
     if missing_count >= MISSING_CONFIRM_COUNT:
-        new_seconds = start_seconds
+        new_seconds = last_seconds
         stable["clock_state"] = "STOPPED"
         stable["scoreboard_missing_confirmed"] = True
     else:
@@ -1613,32 +1614,54 @@ def apply_long_missing_clock_resync_if_needed(
     previous_missing_count: int,
     time_sec: float,
 ) -> tuple[ParsedScoreboard | None, bool]:
-    """10번 이상 scoreboard missing 뒤에는 OCR clock을 다시 믿지 않고 5초만 보정한다.
+    """10번 이상 scoreboard missing 뒤에는 clock OCR을 제한적으로 다시 믿는다.
 
-    기존 방식은 재등장 프레임에서 clock OCR을 다시 읽었는데,
-    04:45 -> 01:53 같은 말도 안 되는 값을 믿는 문제가 있었다.
-
-    그래서 이 함수는 10번 이상 missing이면 단순하게:
-    현재 저장된 game_clock_seconds - CUT_EDIT_CLOCK_ADJUST_SEC
-    로 clock만 조정한다.
+    규칙:
+    - 10번 미만 missing이면 기존 로직으로 넘긴다.
+    - 10번 이상 missing 후 재등장하면 컷편집으로 판단한다.
+    - 이때 raw clock이 기존 저장 clock보다 작고, 감소 폭이 60초 이내면 새 clock으로 인정한다.
+    - raw clock이 없거나, 기존보다 크거나, 60초보다 많이 튀면 기존 clock을 유지한다.
+    - 더 이상 -5초 고정 보정은 하지 않는다.
     """
     if previous_missing_count < CUT_EDIT_MISSING_COUNT:
         return parsed, False
 
     last_seconds = stable.get("game_clock_seconds")
+    raw_seconds = game_clock_to_seconds(parsed.game_clock) if parsed.game_clock else None
 
     print(
         "           -> long missing detected: "
-        f"{previous_missing_count} missing samples, fixed clock adjustment mode"
+        f"{previous_missing_count} missing samples, OCR clock resync mode"
     )
 
-    # 기준 clock이 없으면 비교/조정할 수 없으니 기존 로직으로 넘긴다.
+    # 기준 clock이 없으면 비교할 수 없으니 기존 로직으로 넘긴다.
     if not isinstance(last_seconds, int):
         return parsed, False
 
     old_clock = seconds_to_game_clock(last_seconds)
-    new_seconds = max(0, last_seconds - CUT_EDIT_CLOCK_ADJUST_SEC)
-    new_clock = seconds_to_game_clock(new_seconds)
+    resync_drop = last_seconds - raw_seconds if raw_seconds is not None else None
+
+    if (
+        raw_seconds is not None
+        and raw_seconds < last_seconds
+        and 0 < resync_drop <= MAX_CLOCK_RESYNC_DROP_SEC
+    ):
+        new_seconds = raw_seconds
+        new_clock = seconds_to_game_clock(new_seconds)
+        print(
+            "           -> clock resynced after long missing: "
+            f"{old_clock} -> {new_clock} "
+            f"(drop={resync_drop}s, limit={MAX_CLOCK_RESYNC_DROP_SEC}s)"
+        )
+    else:
+        new_seconds = last_seconds
+        new_clock = old_clock
+        print(
+            "           -> rejected long-missing clock OCR, keep previous clock: "
+            f"last={old_clock}, "
+            f"raw={seconds_to_game_clock(raw_seconds) if raw_seconds is not None else UNKNOWN}, "
+            f"limit={MAX_CLOCK_RESYNC_DROP_SEC}s"
+        )
 
     raw_quarter = parsed.quarter or ""
     quarter = normalize_stable_quarter(stable, raw_quarter, new_seconds)
@@ -1664,12 +1687,6 @@ def apply_long_missing_clock_resync_if_needed(
     stable["scoreboard_missing_confirmed"] = False
     stable["scoreboard_just_reappeared"] = False
     stable["scoreboard_missing_count_before_reappear"] = 0
-
-    print(
-        "           -> clock adjusted after long missing: "
-        f"{old_clock} -> {new_clock} "
-        f"(-{CUT_EDIT_CLOCK_ADJUST_SEC}s)"
-    )
 
     return (
         ParsedScoreboard(
