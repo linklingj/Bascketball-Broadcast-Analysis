@@ -12,7 +12,7 @@ import pandas as pd
 
 
 DEFAULT_VIDEO_PATH = "/kaggle/input/datasets/yerinim/basketball/1_.mp4"
-DEFAULT_OUTPUT_PATH = "/kaggle/working/score_timeline_full_26min_fixed_5sec.csv"
+DEFAULT_OUTPUT_PATH = "/kaggle/working/score_timeline_full_26min_clock_safe_predict.csv"
 DEFAULT_INTERVAL_SEC = 1.0
 DEFAULT_CONFIRM_COUNT = 2
 DEFAULT_RESYNC_COUNT = 3
@@ -1530,12 +1530,17 @@ def apply_stable_context(parsed: ParsedScoreboard, stable: dict[str, object], ti
                 )
 
         elif raw_seconds is None:
-            # OCR 실패: 진행/정지 판단 불가 → 직전 상태 기반
-            if clock_state == "STOPPED":
-                new_seconds = last_seconds
-            else:
-                new_seconds = predicted_running_seconds
-                clock_state = "RUNNING"
+            # scoreboard는 잡혔는데 clock OCR만 실패한 경우:
+            # 실제 점수판이 보이는 동안에는 clock이 계속 진행될 가능성이 높으므로
+            # STOPPED 상태였더라도 1초씩 자연스럽게 감소시킨다.
+            # 단, raw clock이 같은 값으로 반복해서 읽힌 경우는 아래 diff == 0에서
+            # 실제 경기 정지로 보고 유지한다.
+            new_seconds = predicted_running_seconds
+            clock_state = "RUNNING"
+            print(
+                "           -> clock OCR missing while scoreboard found, "
+                f"predict clock: {seconds_to_game_clock(last_seconds)} -> {seconds_to_game_clock(new_seconds)}"
+            )
 
         else:
             current_quarter = str(stable.get("game_clock_quarter") or quarter)
