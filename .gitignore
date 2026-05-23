@@ -1,0 +1,87 @@
+# OS / File explorer
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / Editor
+.idea/
+.vscode/
+*.iml
+
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local environment variables
+.env
+.env.*
+*.local
+
+# Testing / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Packaging / build artifacts
+build/
+dist/
+site/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# Notebook
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/
+
+# ML training / inference artifacts
+runs/
+wandb/
+mlruns/
+tensorboard/
+events.out.tfevents.*
+predictions/
+
+# Optional local input/output dirs
+test_images/
+
+# Model artifacts (keep project base model)
+*.ckpt
+*.onnx
+*.engine
+*.tflite
+*.torchscript
+*.safetensors
+*.pt
+!yolo26l-seg.pt
+
+# AWS serverless local artifacts
+.aws-sam/
+.serverless/
+
+# If dataset should be local-only, uncomment below
+dataset/
+
+*.mp4
+#*.csv
+
+# LLM
+.claude
+claude.md
