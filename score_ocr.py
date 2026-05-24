@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import re
@@ -945,12 +945,24 @@ def choose_best_region(
     frame,
     debug: bool = False,
     manual_score_boxes: tuple[tuple[float, float, float, float], tuple[float, float, float, float]] | None = None,
+    known_team_names: tuple[str, str] | None = None,
 ) -> tuple[str, ParsedScoreboard] | None:
     quarter, game_clock, info_teams = extract_scoreboard_info(reader, frame, debug=debug)
-    box_team1, box_team2 = extract_team_names_from_boxes(reader, frame, debug=debug)
     info_team1, info_team2 = info_teams
-    team1_name = box_team1 or info_team1
-    team2_name = box_team2 or info_team2
+    known_team1 = ""
+    known_team2 = ""
+    if known_team_names is not None:
+        known_team1, known_team2 = known_team_names
+        known_team1 = "" if known_team1 == UNKNOWN else known_team1
+        known_team2 = "" if known_team2 == UNKNOWN else known_team2
+
+    box_team1 = ""
+    box_team2 = ""
+    if not known_team1 or not known_team2:
+        box_team1, box_team2 = extract_team_names_from_boxes(reader, frame, debug=debug)
+
+    team1_name = known_team1 or box_team1 or info_team1
+    team2_name = known_team2 or box_team2 or info_team2
     best_box_result: tuple[str, ParsedScoreboard] | None = None
     best_box_quality = float("-inf")
 
@@ -1338,6 +1350,10 @@ def analyze_video(
             frame,
             debug=debug,
             manual_score_boxes=manual_score_boxes,
+            known_team_names=(
+                str(stable.get("team1_name") or ""),
+                str(stable.get("team2_name") or ""),
+            ),
         )
         if result is None:
             print(f"[{format_analysis_time(time_sec)}] scoreboard not found")
