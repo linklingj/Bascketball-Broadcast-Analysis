@@ -79,6 +79,12 @@
 > 그리고 **최근 이벤트 리스트**를 보여줍니다. 어웨이가 득점에 성공하면 최근 이벤트에
 > "슛 성공"이 추가되고, 그에 따라 홈팀 승리 확률과 최종 점수 예측이 즉시 하향 조정됩니다.
 
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/8b7d85b4-eb68-474a-9311-70551fa71af7" controls width="85%"></video>
+</p>
+
+<p align="center"><em>🎬 최종 결과 시연 영상 — 실시간 점수 예측 · 승리 확률 · 이벤트 타임라인</em></p>
+
 | 지표 | 결과 |
 | --- | --- |
 | 선수 객체 탐지율 | 전체 프레임의 **97%** |
@@ -136,6 +142,12 @@ flowchart LR
 </p>
 
 <p align="center"><em>선수(파랑)·공(빨강)·골대(주황) 객체 탐지 및 팀 구분 결과</em></p>
+
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/f454c80e-b7fa-45c8-88e4-971f3311a9f4" controls width="85%"></video>
+</p>
+
+<p align="center"><em>🎬 선수·공 객체 탐지 및 공 궤적 보간 처리 과정</em></p>
 
 **처리 흐름**
 
